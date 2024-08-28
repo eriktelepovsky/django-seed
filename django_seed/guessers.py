@@ -1,7 +1,14 @@
 from django.db.models import *
+try:
+    # JSONField is not defined in Django versions < 2 or might be in
+    # another import path for versions >= 2.
+    from django.db.models import JSONField
+except ImportError:
+    from django.contrib.postgres.fields import JSONField
 from django.conf import settings
 from django.core.validators import validate_comma_separated_integer_list
 from django.utils import timezone
+from django.contrib.postgres.fields import ArrayField
 
 import random
 import re
@@ -76,6 +83,19 @@ class FieldTypeGuesser(object):
         faker = self.faker
         provider = self.provider
 
+        if field.choices:
+            collected_choices = []
+            for choice in field.choices:
+                # Check if we have choices that are in named groups
+                # https://docs.djangoproject.com/en/3.2/ref/models/fields/#choices
+                if type(choice[1]) != str:
+                    for named_choice in choice[1]:
+                        collected_choices.append(named_choice)
+                else:
+                    collected_choices.append(choice)
+
+            return lambda x: random.choice(collected_choices)[0]
+
         if isinstance(field, DurationField): return lambda x: provider.duration()
         if isinstance(field, UUIDField): return lambda x: provider.uuid()
 
@@ -90,7 +110,7 @@ class FieldTypeGuesser(object):
         if isinstance(field, DecimalField): return lambda x: provider.rand_float(field=field)
 
         if isinstance(field, URLField): return lambda x: faker.uri()
-        if isinstance(field, SlugField): return lambda x: faker.uri_page()
+        if isinstance(field, SlugField): return lambda x: faker.slug()
         if isinstance(field, IPAddressField) or isinstance(field, GenericIPAddressField):
             protocol = random.choice(['ipv4', 'ipv6'])
             return lambda x: getattr(faker, protocol)()
@@ -104,7 +124,9 @@ class FieldTypeGuesser(object):
         if isinstance(field, FilePathField): return lambda x: provider.file_name()
         if isinstance(field, FileField): return lambda x: provider.file_name()
 
-        if isinstance(field, CharField): return lambda x: provider.rand_text(faker, field=field)
+        if isinstance(field, CharField):
+            return lambda x: faker.text(field.max_length) if field.max_length >= 5 else faker.word()
+            # return lambda x: provider.rand_text(faker, field=field)
         if isinstance(field, TextField): return lambda x: faker.text()
 
         if isinstance(field, DateTimeField):
@@ -112,12 +134,19 @@ class FieldTypeGuesser(object):
             return lambda x: _timezone_format(faker.date_time())
         if isinstance(field, DateField): return lambda x: faker.date()
         if isinstance(field, TimeField): return lambda x: faker.time()
+        if isinstance(field, ArrayField):
+            return lambda x: [self.guess_format(field.base_field)(1)]
+
+        if isinstance(field, JSONField):
+            def json_generator(_, data_columns: list = None, num_rows: int = 10, indent: int = None) -> str:
+                return faker.json(data_columns=data_columns, num_rows=num_rows, indent=indent)
+            return json_generator
 
         # TODO: This should be fine, but I can't find any models that I can use
         # in a simple test case.
         if hasattr(field, '_default_hint'): return lambda x: field._default_hint[1]
 
         # Checking name as string so that postgres library doesn't need to be imported
-        if type(field).__name__ == 'JSONField': return lambda x: '{}'
+        # if type(field).__name__ == 'JSONField': return lambda x: '{}'
 
         raise AttributeError(field)

@@ -1,28 +1,29 @@
 import random
-
 from contextlib import contextmanager
 from datetime import datetime
 
+from alphabet_detector import AlphabetDetector
 from django import VERSION as django_version
 from django.conf import settings
+from django.contrib.postgres.fields import ArrayField
 from django.core.management import call_command
 from django.core.validators import validate_comma_separated_integer_list
 from django.db import models
+from django.db.utils import IntegrityError
 from django.utils import timezone
-
-from django_seed.guessers import NameGuesser, FieldTypeGuesser
-from django_seed.seeder import Seeder
-from django_seed.exceptions import SeederException, SeederCommandError
-from django_seed import Seed
-
 from faker import Faker
-from alphabet_detector import AlphabetDetector
 from jsonfield import JSONField
+
+from django_seed import Seed
+from django_seed.exceptions import SeederCommandError, SeederException
+from django_seed.guessers import FieldTypeGuesser, NameGuesser
+from django_seed.seeder import Seeder
 
 try:
     from django.utils.unittest import TestCase
 except:
     from django.test import TestCase
+
 from unittest import skipIf
 
 fake = Faker()
@@ -137,6 +138,17 @@ class NotCoveredFields(models.Model):
     json = JSONField()
 
 
+# This model should only be created when Postgres is being used
+class PhoneNumberPerson(models.Model):
+    phones = ArrayField(
+        base_field=models.CharField(
+            ("Phone Number"),
+            max_length=50,
+            unique=True
+        )
+    ) if 'postgres' in settings.DATABASES else None
+
+
 class NameGuesserTestCase(TestCase):
 
     def setUp(self):
@@ -172,10 +184,17 @@ class FieldTypeGuesserTestCase(TestCase):
             value = generator(datetime.now())
             self.assertFalse(timezone.is_aware(value))
 
-    # TODO: Find model field with _default_hint to use in test
-    # def test_guess_not_in_format(self):
-    #     generator = self.instance.guess_format(JSONField())
-    #     self.assertEquals(generator(), '{}')
+    def test_guess_json_format(self):
+        import json
+        try:
+            from django.db.models import JSONField
+        except ImportError:
+            from django.contrib.postgres.fields import JSONField
+
+        generator = self.instance.guess_format(JSONField())
+        result = generator({}, data_columns={'name': 'first_name_nonbinary'}, num_rows=1)
+        self.assertIn('name', json.loads(result))
+
 
 class SeederTestCase(TestCase):
 
@@ -357,6 +376,14 @@ class SeedCommandTestCase(TestCase):
             self.assertTrue(isinstance(e, SeederCommandError))
         pass
 
+    def test_seed_command_forced_field(self):
+        call_command('seed', 'django_seed', '--seeder', 'Customer.name', 'BobbyLongName', '--number=12')
+
+        customers = Customer.objects.all()
+        
+        self.assertTrue(customers[0].name == 'BobbyLongName')
+        self.assertTrue(len(customers) == 12)
+
 class DefaultValueTestCase(TestCase):
 
     def test_default_value_guessed_by_field_type(self):
@@ -411,7 +438,7 @@ class LengthRulesTestCase(TestCase):
 
         customer = Customer.objects.get(id=_id[Customer][0])
 
-        self.assertTrue(len(customer.name) <= name_max_len, 
+        self.assertTrue(len(customer.name) <= name_max_len,
             "name with length {}, does not respect max length restriction of {}"
             .format(len(customer.name), name_max_len))
 
@@ -442,7 +469,6 @@ class LengthRulesTestCase(TestCase):
 
         self.assertTrue(len(DEF_LD) == len(product.description))
 
-
 class RelationshipTestCase(TestCase):
 
     def test_one_to_one(self):
@@ -452,8 +478,8 @@ class RelationshipTestCase(TestCase):
         seeder.add_entity(Pen, 1)
         seeder.add_entity(Reporter, 1)
 
-        seeder.execute()
-        self.assertEqual(Reporter.objects.get(id=1).pen.pk, 1)
+        result = seeder.execute()
+        self.assertEqual(Reporter.objects.get(id=result[Reporter][0]).pen.pk, result[Pen][0])
 
     def test_one_to_one_wrong_order(self):
         faker = fake
@@ -467,15 +493,16 @@ class RelationshipTestCase(TestCase):
     def test_many_to_one(self):
         faker = fake
         seeder = Seeder(faker)
-        
+
         seeder.add_entity(Pen, 1)
         seeder.add_entity(Reporter, 1)
         seeder.add_entity(Article, 1)
 
-        seeder.execute()
-        self.assertNotEqual(Reporter.objects.get(id=1), None)
-        self.assertNotEqual(Article.objects.get(id=1), None)
-        self.assertEqual(Article.objects.get(id=1).reporter.pk, 1)
+        results = seeder.execute()
+
+        self.assertNotEqual(Reporter.objects.get(id=results[Reporter][0]), None)
+        self.assertNotEqual(Article.objects.get(id=results[Article][0]), None)
+        self.assertEqual(Article.objects.get(id=results[Article][0]).reporter.pk, results[Reporter][0])
 
     def test_many_to_one_wrong_order(self):
         faker = fake
@@ -490,7 +517,7 @@ class RelationshipTestCase(TestCase):
     def test_many_to_many(self):
         faker = fake
         seeder = Seeder(faker)
-        
+
         seeder.add_entity(Pen, 1)
         seeder.add_entity(Reporter, 1)
         seeder.add_entity(Article, 1)
@@ -514,7 +541,7 @@ class RelationshipTestCase(TestCase):
     #     seeder.add_entity(Article, 1)
 
     #     seeder.execute()
-        
+
     #     seeder.add_entity(Newspaper, 1)
 
     #     seeder.execute()
@@ -522,3 +549,110 @@ class RelationshipTestCase(TestCase):
     #     self.assertNotEqual(Reporter.objects.get(id=1), None)
     #     self.assertNotEqual(Article.objects.get(id=1), None)
     #     self.assertEqual(len(Reporter.objects.get(id=1).newspaper_set.all()), 1)
+
+class EdgeCaseFieldTestCase(TestCase):
+
+    @skipIf(settings.DATABASES['default']['ENGINE'] != 'django.db.backends.postgresql_psycopg2', "Postgres database is not configured, or the tests aren't being run with the `actions` argument.")
+    def test_postgres_array_field(self):
+        print("Aasdf")
+        faker = fake
+        seeder = Seeder(faker)
+        seeder.add_entity(NotCoveredFields, 1)
+
+        seeder.execute()
+
+class Animal(models.Model):
+    SPECIES_CHOICES = [
+        ('DG', 'Dog'),
+        ('CT', 'Cat'),
+        ('EL', 'Elephant'),
+    ]
+
+    species = models.CharField(
+        max_length = 2,
+        choices = SPECIES_CHOICES
+    )
+
+    COLOR_CHOICES = [
+        (1, 'Black'),
+        (2, 'White'),
+        (3, 'Brown'),
+    ]
+
+    first_color = models.SmallIntegerField(
+        choices = COLOR_CHOICES, unique=True
+    )
+
+    second_color = models.BigIntegerField(
+        choices = COLOR_CHOICES
+    )
+
+    FARM_CHOICES = [
+        (
+            "Alansburg",
+            (
+                (1, "Ruby's farm"),
+                (2, "Ben's farm"),
+            ),
+        ),
+        (
+            "Cornwall",
+            (
+                (3, "Becky's farm"),
+                (4, "Tom's farm"),
+            ),
+        ),
+        (5, "Internet farm")
+    ]
+
+    farm = models.IntegerField(
+        choices = FARM_CHOICES
+    )
+
+class Choices(TestCase):
+    def test_fields(self):
+        faker = fake
+        seeder = Seeder(faker)
+
+        seeder.add_entity(Animal, 1)
+
+        result = seeder.execute()
+
+        animal_object = Animal.objects.get(id=result[Animal][0])
+
+        self.assertTrue(animal_object.species in [x[0] for x in Animal.SPECIES_CHOICES])
+        self.assertTrue(animal_object.first_color in [x[0] for x in Animal.COLOR_CHOICES])
+        self.assertTrue(animal_object.second_color in [x[0] for x in Animal.COLOR_CHOICES])
+        self.assertTrue(animal_object.farm <= 5)
+
+class UniquenessTestCase(TestCase):
+    def test_pigeon_hole_principle(self):
+        faker = fake
+        seeder = Seeder(faker)
+
+        seeder.add_entity(Animal, 8)
+
+        result = seeder.execute()
+
+    def test_impossible_uniqueness(self):
+        faker = fake
+        seeder = Seeder(faker)
+
+        seeder.add_entity(Animal, 1, {
+            "first_color": 1
+        })
+
+        seeder.add_entity(Animal, 1, {
+            "first_color": 2
+        })
+
+        seeder.add_entity(Animal, 1, {
+            "first_color": 3
+        })
+
+        result = seeder.execute()
+
+        # This fourth animal cannot have a unique first color
+        seeder.add_entity(Animal, 1)
+
+        self.assertRaises(IntegrityError, seeder.execute)
